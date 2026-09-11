@@ -1,3 +1,5 @@
+## a lm agent playthrough tester | all jippity ;( 
+
 ### Instructions
 
 try to complete the game. 
