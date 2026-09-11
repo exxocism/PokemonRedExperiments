@@ -14,6 +14,8 @@ from pyboy import PyBoy
 
 ROM = Path("../PokemonRed.gb")
 HISTORY = Path("history")
+SAVES = Path("saves")
+STATE_SAVE_INTERVAL = 100
 FIELDS = [
     "session_id", "event", "frame", "frames", "x", "y", "map_id", "buttons",
     "state_sha256", "initial_state", "rom_sha256", "pyboy_version",
@@ -63,6 +65,7 @@ def record(stream=True, stream_metadata=None):
     pyboy_version = version("pyboy")
     game = PyBoy(str(ROM), window="null")
     frame = 0
+    completed_steps = 0
     screenshots = 0
     streamer = None
 
@@ -142,6 +145,12 @@ def record(stream=True, stream_metadata=None):
                     if button:
                         game.button_release(button)
                         log_event("release", button)
+                    completed_steps += 1
+                    if completed_steps % STATE_SAVE_INTERVAL == 0:
+                        state_path = SAVES / session_id / f"step_{completed_steps:05d}.state"
+                        state_path.parent.mkdir(parents=True, exist_ok=True)
+                        state_path.write_bytes(save_state(game))
+                        print(f"Saved state at step {completed_steps}: {state_path}", flush=True)
                 take_screenshot()
             log_event("end")
     finally:
