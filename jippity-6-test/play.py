@@ -56,7 +56,7 @@ def prepare_log(path):
             raise ValueError(f"Unrecognized CSV format in {path}")
 
 
-def record(stream=True, stream_metadata=None):
+def record(stream=True, stream_metadata=None, load_state=None):
     HISTORY.mkdir(exist_ok=True)
     path = Path("steps.csv")
     prepare_log(path)
@@ -70,6 +70,10 @@ def record(stream=True, stream_metadata=None):
     streamer = None
 
     try:
+        if load_state is not None:
+            with load_state.open("rb") as state_file:
+                game.load_state(state_file)
+            print(f"Loaded state: {load_state}", flush=True)
         if stream:
             from stream_agent_wrapper import CoordinateStreamer
 
@@ -127,7 +131,14 @@ def record(stream=True, stream_metadata=None):
                 "start", initial_state=initial_state, rom_sha256=rom_sha256,
                 pyboy_version=pyboy_version,
             )
-            advance(60)
+            if load_state is None:
+                advance(60)
+            else:
+                # Save states retain held buttons, but not queued releases.
+                # Log the releases so a resumed session remains replayable.
+                for button in ("a", "b", "start", "select", "left", "right", "up", "down"):
+                    game.button_release(button)
+                    log_event("release", button)
             take_screenshot()
             while True:
                 try:
@@ -161,7 +172,7 @@ def record(stream=True, stream_metadata=None):
             game.stop(save=False)
 
 
-def replay(path, selected_session=None):
+def replay(path, selected_session=None, save_final_state=False):
     # The CSV embeds a compressed initial save state, which can be a large field.
     csv.field_size_limit(16 * 1024 * 1024)
     rom_sha256 = hashlib.sha256(ROM.read_bytes()).hexdigest()
@@ -172,6 +183,18 @@ def replay(path, selected_session=None):
     frame = 0
     screenshots = 0
     directory = None
+
+    def finish_session():
+        nonlocal game
+        if game is None:
+            return
+        if save_final_state:
+            state_path = SAVES / session_id / "final.state"
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            state_path.write_bytes(save_state(game))
+            print(f"Saved final state at frame {frame}: {state_path}", flush=True)
+        game.stop(save=False)
+        game = None
 
     try:
         with path.open(newline="") as csv_file:
@@ -187,11 +210,11 @@ def replay(path, selected_session=None):
                         raise ValueError("Replay requires the same PokemonRed.gb ROM")
                     if row["pyboy_version"] != pyboy_version:
                         raise ValueError(f"Replay requires PyBoy {row['pyboy_version']}")
-                    if game is not None:
-                        game.stop(save=False)
+                    finish_session()
                     game = PyBoy(str(ROM), window="null")
                     state = zlib.decompress(base64.b64decode(row["initial_state"], validate=True))
                     game.load_state(io.BytesIO(state))
+                    game.set_emulation_speed(0)
                     session_id = row["session_id"]
                     if len(session_id) != 32 or any(c not in "0123456789abcdef" for c in session_id):
                         raise ValueError("Invalid session ID")
@@ -226,10 +249,11 @@ def replay(path, selected_session=None):
                 ):
                     raise ValueError(f"Replay diverged at CSV line {reader.line_num}, frame {frame}")
                 if event == "end":
-                    game.stop(save=False)
-                    game = None
+                    finish_session()
         if not found:
             raise ValueError("No matching recorded session found")
+        # Logs captured during play may end without an explicit "end" event.
+        finish_session()
     finally:
         if game is not None:
             game.stop(save=False)
@@ -237,19 +261,27 @@ def replay(path, selected_session=None):
 
 def main():
     parser = argparse.ArgumentParser(description="Record or replay frame-exact Pokemon Red sessions")
-    parser.add_argument("--replay", type=Path, help="Replay sessions from this CSV without modifying it")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--replay", type=Path, help="Replay sessions from this CSV without modifying it")
+    mode.add_argument("--load-state", type=Path, help="Resume recording from a PyBoy .state file")
     parser.add_argument("--session", help="Replay only this session ID (default: replay all sessions)")
+    parser.add_argument(
+        "--save-final-state", action="store_true",
+        help="Save each replayed session's final state to saves/<session_id>/final.state",
+    )
     parser.add_argument("--no-stream", action="store_true", help="Disable live coordinate broadcasting")
     parser.add_argument("--stream-metadata", type=json.loads, default={}, help="Stream metadata as a JSON object")
     args = parser.parse_args()
     if args.session and args.replay is None:
         parser.error("--session requires --replay")
+    if args.save_final_state and args.replay is None:
+        parser.error("--save-final-state requires --replay")
     if not isinstance(args.stream_metadata, dict):
         parser.error("--stream-metadata must be a JSON object")
     if args.replay is None:
-        record(stream=not args.no_stream, stream_metadata=args.stream_metadata)
+        record(stream=not args.no_stream, stream_metadata=args.stream_metadata, load_state=args.load_state)
     else:
-        replay(args.replay, args.session)
+        replay(args.replay, args.session, save_final_state=args.save_final_state)
 
 
 if __name__ == "__main__":
